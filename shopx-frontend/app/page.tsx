@@ -23,6 +23,15 @@ type ChatResult = {
   escalation_id: number | null;
 };
 
+type EvidenceResult = {
+  conversation_id: number;
+  reply: string;
+  evidence_count: number;
+  confidence: number;
+  recommended_resolution: string;
+  escalation_id: number;
+};
+
 const products: Product[] = [
   { icon: "🎧", name: "Orbit Pro Headphones", category: "Audio", price: "₹4,999", tone: "mint" },
   { icon: "⌚", name: "Pulse Smartwatch S2", category: "Wearables", price: "₹6,499", tone: "blue" },
@@ -34,9 +43,10 @@ const initialMessages: Message[] = [
 ];
 
 async function supportApi<T>(path: string, init?: RequestInit): Promise<T> {
+  const isForm = init?.body instanceof FormData;
   const response = await fetch(`/api/support/${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: { ...(isForm ? {} : { "Content-Type": "application/json" }), ...init?.headers },
   });
   const payload = await response.json().catch(() => ({})) as { detail?: string };
   if (!response.ok) throw new Error(payload.detail || "The support service could not complete the request.");
@@ -59,6 +69,7 @@ export default function Home() {
   const [ordersLoading, setOrdersLoading] = useState(true);
   const [placingOrder, setPlacingOrder] = useState(false);
   const [sendingMessage, setSendingMessage] = useState(false);
+  const [uploadingEvidence, setUploadingEvidence] = useState(false);
   const [orderError, setOrderError] = useState("");
   const [supportError, setSupportError] = useState("");
 
@@ -150,6 +161,29 @@ export default function Home() {
   }
 
   function sendMessage(event: FormEvent) { event.preventDefault(); void answerIssue(draft); }
+
+  async function uploadEvidence(file: File) {
+    if (!conversationId || !supportOrder || uploadingEvidence) return;
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 4 * 1024 * 1024) {
+      setSupportError("Choose a valid JPEG, PNG, or WebP image up to 4 MB.");
+      return;
+    }
+    setUploadingEvidence(true);
+    setSupportError("");
+    const form = new FormData();
+    form.append("customer_id", "1");
+    form.append("order_id", String(supportOrder.id));
+    form.append("conversation_id", String(conversationId));
+    form.append("file", file);
+    try {
+      const result = await supportApi<EvidenceResult>("chat/evidence", { method: "POST", body: form });
+      setMessages((current) => [...current, { from: "user", text: `Uploaded evidence: ${file.name}` }, { from: "ai", text: result.reply, meta: `Recommendation: ${result.recommended_resolution} • Ticket #${result.escalation_id}` }]);
+    } catch (error) {
+      setSupportError(error instanceof Error ? error.message : "Evidence upload failed.");
+    } finally {
+      setUploadingEvidence(false);
+    }
+  }
   const navView = view === "checkout" || view === "confirmed" ? "products" : view;
 
   return <main>
@@ -172,7 +206,7 @@ export default function Home() {
 
     {view === "orders" && <section className="section page"><span className="eyebrow">STEP 3 • CUSTOMER SELECTS AN ORDER</span><h1>My Orders</h1><p className="page-lead">These orders are loaded from the ShopX PostgreSQL account.</p>{ordersLoading && <div className="empty-state">Loading saved orders…</div>}{orderError && <div className="problem-note" role="alert"><b>Orders unavailable</b><span>{orderError}</span></div>}{!ordersLoading && !orderError && orders.length === 0 && <div className="empty-state">No saved orders yet. Place an order to start the demo.</div>}<div className="saved-orders">{orders.map((order) => <article className="order-card problem" key={order.id}><div className="order-icon">🎧</div><div><small>ORDER #{order.external_order_id}</small><h3>{order.product_name}</h3><p>Saved {formatDate(order.created_at)} • ₹{order.amount}</p><div className="track"><span className="passed">✓ Order saved</span><span className="warning">{order.status}</span></div><div className="problem-note"><b>Live backend status</b><span>{order.status}</span></div></div><div className="order-status"><span className="late">● {order.status}</span><button className="support-cta" onClick={() => openOrderSupport(order)}>Get help with this order →</button></div></article>)}</div></section>}
 
-    {view === "support" && <section className="support-flow"><div className="support-info"><span className="eyebrow">STEP 4 • CUSTOMER ASKS FOR HELP</span><h1>AI Order Support</h1><p>The customer enters support from a saved order. The backend receives the order context automatically.</p>{supportOrder ? <div className="linked-order"><div className="order-icon small">🎧</div><div><small>LINKED ORDER</small><strong>#{supportOrder.external_order_id} • {supportOrder.product_name}</strong><span>Status: {supportOrder.status}</span></div><b>PostgreSQL order context sent to AI ✓</b></div> : <button className="primary" disabled={!orders.length} onClick={() => openOrderSupport(orders[0] ?? null)}>{orders.length ? "Load latest saved order" : "Place an order first"}</button>}<div className="demo-hint"><strong>Try both outcomes:</strong><span>“Where is my order?” → order-status response</span><span>“My item arrived damaged” → human escalation</span></div></div><div className="support-chat-card"><div className="chat-head inline"><div className="ai-logo">✦</div><div><strong>ShopX AI Support</strong><span><i></i> Connected to FastAPI + Gemini</span></div></div><div className="messages large">{messages.map((message, index) => <div key={index} className={`message ${message.from}`}>{message.text}{message.meta && <small className="message-meta">✓ {message.meta}</small>}</div>)}</div><div className="quick"><button disabled={sendingMessage} onClick={() => void answerIssue("Where is my order?")}>Where is my order?</button><button disabled={sendingMessage} onClick={() => void answerIssue("My item arrived damaged")}>Item arrived damaged</button><button disabled={sendingMessage} onClick={() => void answerIssue("Can I return this order?")}>Return question</button></div><form className="support-form" onSubmit={sendMessage}><input value={draft} disabled={sendingMessage} onChange={(event) => setDraft(event.target.value)} placeholder="Describe your problem…" aria-label="Chat message"/><button type="submit" disabled={sendingMessage}>{sendingMessage ? "…" : "Send"}</button></form>{supportError && <small className="chat-note" role="alert">{supportError}</small>}<small className="chat-note">Replies and escalation IDs come from the live support backend.</small></div></section>}
+    {view === "support" && <section className="support-flow"><div className="support-info"><span className="eyebrow">STEP 4 • CUSTOMER ASKS FOR HELP</span><h1>AI Order Support</h1><p>The customer enters support from a saved order. The backend receives the order context automatically.</p>{supportOrder ? <div className="linked-order"><div className="order-icon small">🎧</div><div><small>LINKED ORDER</small><strong>#{supportOrder.external_order_id} • {supportOrder.product_name}</strong><span>Status: {supportOrder.status}</span></div><b>PostgreSQL order context sent to AI ✓</b></div> : <button className="primary" disabled={!orders.length} onClick={() => openOrderSupport(orders[0] ?? null)}>{orders.length ? "Load latest saved order" : "Place an order first"}</button>}<div className="demo-hint"><strong>Try both outcomes:</strong><span>“Where is my order?” → order-status response</span><span>“My item arrived damaged” → human escalation</span></div></div><div className="support-chat-card"><div className="chat-head inline"><div className="ai-logo">✦</div><div><strong>ShopX AI Support</strong><span><i></i> Connected to FastAPI + Gemini</span></div></div><div className="messages large">{messages.map((message, index) => <div key={index} className={`message ${message.from}`}>{message.text}{message.meta && <small className="message-meta">✓ {message.meta}</small>}</div>)}</div><div className="quick"><button disabled={sendingMessage} onClick={() => void answerIssue("Where is my order?")}>Where is my order?</button><button disabled={sendingMessage} onClick={() => void answerIssue("My item arrived damaged")}>Item arrived damaged</button><button disabled={sendingMessage} onClick={() => void answerIssue("Can I return this order?")}>Return question</button></div><form className="support-form" onSubmit={sendMessage}><label className={`attach-button ${!conversationId ? "disabled" : ""}`} title={conversationId ? "Upload customer evidence" : "Describe the issue first"}>Photo<input type="file" accept="image/jpeg,image/png,image/webp" disabled={!conversationId || uploadingEvidence} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadEvidence(file); event.target.value = ""; }}/></label><input value={draft} disabled={sendingMessage} onChange={(event) => setDraft(event.target.value)} placeholder="Describe your problem…" aria-label="Chat message"/><button type="submit" disabled={sendingMessage}>{sendingMessage ? "…" : "Send"}</button></form>{supportError && <small className="chat-note" role="alert">{supportError}</small>}<small className="chat-note">Replies and escalation IDs come from the live support backend.</small></div></section>}
 
     {view !== "support" && <button className="chat-fab" onClick={() => openOrderSupport()} aria-label="Open AI support"><span>✦</span><div><strong>Need help?</strong><small>Ask ShopX AI</small></div></button>}
   </main>;
