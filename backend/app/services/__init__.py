@@ -7,6 +7,7 @@ from app.services.support_ai import (
     SupportAIService,
     SupportContext,
     SupportResult,
+    SupportTurn,
 )
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "SupportContext",
     "ProviderObservation",
     "SupportResult",
+    "SupportTurn",
     "create_support_ai_service",
     "support_ai_service",
 ]
