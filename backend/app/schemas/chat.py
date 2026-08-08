@@ -25,3 +25,12 @@ class ChatResponse(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     should_escalate: bool
     escalation_id: int | None
+
+
+class EvidenceUploadResponse(BaseModel):
+    conversation_id: int
+    reply: str
+    evidence_count: int
+    confidence: float = Field(ge=0.0, le=1.0)
+    recommended_resolution: str
+    escalation_id: int

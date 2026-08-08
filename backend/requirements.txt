@@ -4,3 +4,4 @@ pydantic-settings
 SQLAlchemy>=2.0,<3.0
 psycopg[binary]>=3.0,<4.0
 google-genai>=1.0,<2.0
+python-multipart>=0.0.20,<1.0

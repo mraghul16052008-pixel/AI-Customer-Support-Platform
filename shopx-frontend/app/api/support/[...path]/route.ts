@@ -4,6 +4,7 @@ const allowedRequests = new Set([
   "GET customers/1/orders",
   "POST orders",
   "POST chat",
+  "POST chat/evidence",
 ]);
 
 async function proxy(request: NextRequest, pathParts: string[]) {
@@ -22,15 +23,16 @@ async function proxy(request: NextRequest, pathParts: string[]) {
   }
 
   try {
+    const contentType = request.headers.get("content-type") ?? "application/json";
     const backendResponse = await fetch(`${baseUrl}/api/v1/${path}`, {
       method: request.method,
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type": contentType,
         "X-API-Key": apiKey,
       },
-      body: request.method === "GET" ? undefined : await request.text(),
+      body: request.method === "GET" ? undefined : await request.arrayBuffer(),
       cache: "no-store",
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(30_000),
     });
     return new Response(await backendResponse.text(), {
       status: backendResponse.status,

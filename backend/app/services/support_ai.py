@@ -1,48 +1,33 @@
-from dataclasses import dataclass
-from enum import StrEnum
+from dataclasses import dataclass, replace
 import logging
 from math import isfinite
-from typing import Protocol
+from typing import Mapping
 
+from app.services.intent_router import IntentRouter, RoutingOutcome
+from app.services.support_agents import AgentOutcome, SpecializedSupportAgent, create_agent_registry
+from app.services.support_tools import ContextSupportTools, TrustedSupportTools
+from app.services.support_types import (
+    AgentAction,
+    EvidenceAnalysis,
+    RecommendedResolution,
+    RoutingDecision,
+    SupportContext,
+    SupportIntent,
+    SupportProvider,
+    SupportResult,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class SupportIntent(StrEnum):
-    ORDER_STATUS = "order_status"
-    DELIVERY_ISSUE = "delivery_issue"
-    REFUND = "refund"
-    CANCELLATION = "cancellation"
-    PAYMENT_ISSUE = "payment_issue"
-    ACCOUNT_ISSUE = "account_issue"
-    GENERAL_QUERY = "general_query"
-
-
 @dataclass(frozen=True)
 class SupportTurn:
+    """Backwards-compatible conversation turn used by existing integrations/tests."""
+
     sender_type: str
     content: str
     intent: str | None = None
     confidence: float | None = None
-
-
-@dataclass(frozen=True)
-class SupportContext:
-    message: str
-    customer_name: str | None = None
-    order_status: str | None = None
-    external_order_id: str | None = None
-    product_name: str | None = None
-    history: tuple[SupportTurn, ...] = ()
-
-
-@dataclass(frozen=True)
-class SupportResult:
-    reply: str
-    intent: SupportIntent
-    confidence: float
-    should_escalate: bool
-    escalation_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -54,245 +39,162 @@ class ProviderObservation:
     error_type: str | None = None
     error_code: str | int | None = None
     error_status: str | None = None
-
-
-class SupportProvider(Protocol):
-    def respond(self, context: SupportContext) -> SupportResult: ...
+    router_used: str = "IntentRouter"
+    router_provider_succeeded: bool = False
+    router_fallback_used: bool = False
+    selected_intent: SupportIntent | None = None
+    selected_agent: str | None = None
+    specialist_provider_succeeded: bool = False
+    specialist_fallback_used: bool = False
+    confidence: float | None = None
+    should_escalate: bool | None = None
+    agent_action: AgentAction | None = None
+    recommended_resolution: RecommendedResolution | None = None
+    missing_information: tuple[str, ...] = ()
+    evidence_needed: tuple[str, ...] = ()
+    findings: tuple[str, ...] = ()
 
 
 class DeterministicSupportProvider:
+    def __init__(self) -> None:
+        self.router = IntentRouter()
+        self.agents = create_agent_registry()
+
     def respond(self, context: SupportContext) -> SupportResult:
-        current_text = context.message.casefold()
-        history_text = self._customer_history_text(context)
-        text = "\n".join(part for part in (history_text, current_text) if part)
-
-        if any(term in text for term in ("refund", "money back", "return my")):
-            return self._result(
-                reply=(
-                    "I’ll send your refund request to a support specialist for review."
-                ),
-                intent=SupportIntent.REFUND,
-                confidence=0.94,
-                force_escalation_reason="Refund requests require human review.",
-            )
-
-        if any(term in text for term in ("charged", "payment", "card", "billing")):
-            return self._result(
-                reply=(
-                    "I’m escalating this payment issue so a support specialist can "
-                    "review it safely."
-                ),
-                intent=SupportIntent.PAYMENT_ISSUE,
-                confidence=0.92,
-                force_escalation_reason="Payment issues require secure human review.",
-            )
-
-        if any(term in text for term in ("cancel", "cancellation")):
-            return self._result(
-                reply=(
-                    "I’ll send your cancellation request to a support specialist "
-                    "before any action is taken."
-                ),
-                intent=SupportIntent.CANCELLATION,
-                confidence=0.93,
-                force_escalation_reason="Cancellation requests require human review.",
-            )
-
-        if any(
-            term in text
-            for term in (
-                "late",
-                "delayed",
-                "not arrived",
-                "not delivered",
-                "damaged",
-                "lost",
-            )
-        ):
-            sensitive = any(term in text for term in ("lost", "damaged"))
-            first_sensitive_report = sensitive and not any(
-                term in history_text for term in ("lost", "damaged")
-            )
-            if first_sensitive_report:
-                reply = (
-                    "I’m sorry about that. Before a support agent decides the next "
-                    "step, please tell me what is damaged or missing and whether "
-                    "the outer package also showed damage."
-                )
-            elif sensitive:
-                reply = (
-                    "Thanks — I’ve added that detail to this support conversation. "
-                    "A support specialist can use the order and the details you’ve "
-                    "provided to review the next step."
-                )
-            else:
-                reply = (
-                    "I’m sorry about the delivery problem. I’ve recorded the issue "
-                    "and will help with the next step."
-                )
-            return self._result(
-                reply=reply,
-                intent=SupportIntent.DELIVERY_ISSUE,
-                confidence=0.90,
-                force_escalation_reason=(
-                    "A lost or damaged delivery requires human review."
-                    if sensitive
-                    else None
-                ),
-            )
-
-        if any(
-            term in text
-            for term in ("where is my order", "order status", "track", "tracking")
-        ):
-            if context.order_status:
-                reply = f"Your order is currently {context.order_status}."
-            else:
-                reply = "I can help check the order status once an order is selected."
-            return self._result(
-                reply=reply,
-                intent=SupportIntent.ORDER_STATUS,
-                confidence=0.91,
-            )
-
-        if any(term in text for term in ("account", "login", "password", "sign in")):
-            sensitive = any(
-                term in text for term in ("hacked", "unauthorized", "stolen")
-            )
-            return self._result(
-                reply="I can help with your account issue.",
-                intent=SupportIntent.ACCOUNT_ISSUE,
-                confidence=0.87,
-                force_escalation_reason=(
-                    "A possible account security issue requires human review."
-                    if sensitive
-                    else None
-                ),
-            )
-
-        return self._result(
-            reply=(
-                "I’m not fully certain what you need, so I’m connecting this "
-                "conversation with a support specialist."
-            ),
-            intent=SupportIntent.GENERAL_QUERY,
-            confidence=0.55,
-        )
-
-    @staticmethod
-    def _customer_history_text(context: SupportContext) -> str:
-        return "\n".join(
-            turn.content.casefold()
-            for turn in context.history[-12:]
-            if turn.sender_type.upper() == "CUSTOMER"
-        )
-
-    @staticmethod
-    def _result(
-        *,
-        reply: str,
-        intent: SupportIntent,
-        confidence: float,
-        force_escalation_reason: str | None = None,
-    ) -> SupportResult:
-        confidence = max(0.0, min(1.0, confidence))
-        should_escalate = confidence < 0.70 or force_escalation_reason is not None
-        reason = force_escalation_reason
-        if should_escalate and reason is None:
-            reason = f"Low-confidence {intent.value} request ({confidence:.2f})."
+        routing = self.router.route(context).decision
+        result = self.agents[routing.intent].handle(context).result
         return SupportResult(
-            reply=reply,
-            intent=intent,
-            confidence=confidence,
-            should_escalate=should_escalate,
-            escalation_reason=reason,
+            reply=result.reply,
+            intent=routing.intent,
+            confidence=min(float(routing.confidence), float(result.confidence)),
+            should_escalate=result.should_escalate,
+            escalation_reason=result.escalation_reason,
+            action=result.action,
+            missing_information=result.missing_information,
+            evidence_needed=result.evidence_needed,
+            findings=result.findings,
+            recommended_resolution=result.recommended_resolution,
         )
 
 
 class SupportAIService:
-    def __init__(self, provider: SupportProvider | None = None) -> None:
+    def __init__(
+        self,
+        provider: SupportProvider | object | None = None,
+        *,
+        router: IntentRouter | None = None,
+        agents: Mapping[SupportIntent, SpecializedSupportAgent] | None = None,
+        tools: TrustedSupportTools | None = None,
+    ) -> None:
         self.provider = provider
+        routing_provider = provider if provider is not None and hasattr(provider, "route") else None
+        self.router = router or IntentRouter(routing_provider)  # type: ignore[arg-type]
+        self.agents = dict(agents or create_agent_registry(provider))
+        self.tools = tools or ContextSupportTools()
+        missing_agents = set(SupportIntent) - set(self.agents)
+        if missing_agents:
+            raise ValueError("Agent registry is missing: " + ", ".join(sorted(i.value for i in missing_agents)))
         self.fallback = DeterministicSupportProvider()
+        provider_name = type(provider).__name__ if provider is not None else type(self.fallback).__name__
         self.last_observation = ProviderObservation(
-            selected_provider=(
-                type(provider).__name__
-                if provider is not None
-                else type(self.fallback).__name__
-            ),
+            selected_provider=provider_name,
             request_attempted=False,
             provider_succeeded=False,
             fallback_used=provider is None,
         )
 
     def respond(self, context: SupportContext) -> SupportResult:
-        if self.provider is not None:
-            provider_name = type(self.provider).__name__
-            logger.info("AI provider selected: %s", provider_name)
-            self.last_observation = ProviderObservation(
-                selected_provider=provider_name,
-                request_attempted=True,
-                provider_succeeded=False,
-                fallback_used=False,
-            )
-            try:
-                result = self._apply_backend_safety(
-                    self.provider.respond(context), context
-                )
-                self.last_observation = ProviderObservation(
-                    selected_provider=provider_name,
-                    request_attempted=True,
-                    provider_succeeded=True,
-                    fallback_used=False,
-                )
-                logger.info("AI provider request succeeded: %s", provider_name)
-                return result
-            except Exception as exc:
-                error_code = getattr(exc, "code", None)
-                error_status = getattr(exc, "status", None)
-                self.last_observation = ProviderObservation(
-                    selected_provider=provider_name,
-                    request_attempted=True,
-                    provider_succeeded=False,
-                    fallback_used=True,
-                    error_type=type(exc).__name__,
-                    error_code=(
-                        error_code
-                        if isinstance(error_code, (str, int))
-                        else None
-                    ),
-                    error_status=(
-                        str(error_status) if error_status is not None else None
-                    ),
-                )
-                logger.info(
-                    "AI provider failed; deterministic fallback used: "
-                    "provider=%s error_type=%s error_code=%s error_status=%s",
-                    provider_name,
-                    type(exc).__name__,
-                    self.last_observation.error_code,
-                    self.last_observation.error_status,
-                )
-        else:
-            logger.info("AI provider selected: DeterministicSupportProvider")
-            self.last_observation = ProviderObservation(
-                selected_provider=type(self.fallback).__name__,
-                request_attempted=False,
+        routing = self.router.route(context)
+        routing_decision = routing.decision
+        context = replace(
+            context,
+            trusted_evidence=self.tools.evidence_for(routing_decision.intent, context),
+        )
+        agent = self.agents[routing_decision.intent]
+        logger.info(
+            "AI router used: router=%s selected_intent=%s confidence=%.2f agent=%s",
+            type(self.router).__name__, routing_decision.intent.value,
+            routing_decision.confidence, agent.name,
+        )
+        execution = agent.handle(context)
+        if execution.result.intent != routing_decision.intent:
+            execution = AgentOutcome(
+                result=self.fallback.respond(context),
+                provider_attempted=execution.provider_attempted,
                 provider_succeeded=False,
                 fallback_used=True,
+                error_type="ValueError",
             )
-        return self._apply_backend_safety(self.fallback.respond(context), context)
+
+        combined = SupportResult(
+            reply=execution.result.reply,
+            intent=routing_decision.intent,
+            confidence=min(float(routing_decision.confidence), float(execution.result.confidence)),
+            should_escalate=execution.result.should_escalate,
+            escalation_reason=execution.result.escalation_reason,
+            action=execution.result.action,
+            missing_information=execution.result.missing_information,
+            evidence_needed=execution.result.evidence_needed,
+            findings=execution.result.findings,
+            recommended_resolution=execution.result.recommended_resolution,
+        )
+        try:
+            result = self._apply_backend_safety(combined, context)
+        except Exception:
+            fallback = self.fallback.respond(context)
+            result = self._apply_backend_safety(fallback, context)
+            execution = AgentOutcome(
+                result=fallback,
+                provider_attempted=execution.provider_attempted,
+                provider_succeeded=False,
+                fallback_used=True,
+                error_type="ValueError",
+            )
+
+        fallback_used = routing.fallback_used or execution.fallback_used
+        request_attempted = routing.provider_attempted or execution.provider_attempted
+        provider_succeeded = routing.provider_succeeded and (
+            not execution.provider_attempted or execution.provider_succeeded
+        )
+        agent_decision = execution.decision
+        self.last_observation = ProviderObservation(
+            selected_provider=type(self.provider).__name__ if self.provider is not None else type(self.fallback).__name__,
+            request_attempted=request_attempted,
+            provider_succeeded=provider_succeeded,
+            fallback_used=fallback_used,
+            error_type=execution.error_type or routing.error_type,
+            error_code=execution.error_code or routing.error_code,
+            error_status=execution.error_status or routing.error_status,
+            router_used=type(self.router).__name__,
+            router_provider_succeeded=routing.provider_succeeded,
+            router_fallback_used=routing.fallback_used,
+            selected_intent=routing_decision.intent,
+            selected_agent=agent.name,
+            specialist_provider_succeeded=execution.provider_succeeded,
+            specialist_fallback_used=execution.fallback_used,
+            confidence=result.confidence,
+            should_escalate=result.should_escalate,
+            agent_action=agent_decision.action if agent_decision else None,
+            recommended_resolution=agent_decision.recommended_resolution if agent_decision else None,
+            missing_information=agent_decision.missing_information if agent_decision else (),
+            evidence_needed=agent_decision.evidence_needed if agent_decision else (),
+            findings=agent_decision.findings if agent_decision else (),
+        )
+        logger.info(
+            "AI agent completed: intent=%s agent=%s router_provider=%s specialist_provider=%s fallback=%s confidence=%.2f escalate=%s",
+            routing_decision.intent.value, agent.name, routing.provider_succeeded,
+            execution.provider_succeeded, fallback_used, result.confidence,
+            result.should_escalate,
+        )
+        return result
 
     @staticmethod
-    def _apply_backend_safety(
-        result: SupportResult, context: SupportContext
-    ) -> SupportResult:
+    def _apply_backend_safety(result: SupportResult, context: SupportContext) -> SupportResult:
         if not isinstance(result.intent, SupportIntent):
             raise ValueError("Provider returned an unsupported intent.")
-        if not result.reply.strip():
+        if not isinstance(result.reply, str) or not result.reply.strip():
             raise ValueError("Provider returned an empty reply.")
-        if not isinstance(result.confidence, (int, float)) or not isfinite(
-            result.confidence
-        ):
+        if not isinstance(result.confidence, (int, float)) or not isfinite(result.confidence):
             raise ValueError("Provider confidence must be a finite number.")
         if not 0.0 <= result.confidence <= 1.0:
             raise ValueError("Provider confidence must be between 0 and 1.")
@@ -307,54 +209,110 @@ class SupportAIService:
                 context.message,
             ]
         ).casefold()
+        refund = result.intent == SupportIntent.REFUND or any(t in text for t in ("refund", "money back", "return"))
+        payment = result.intent == SupportIntent.PAYMENT_ISSUE or any(t in text for t in ("charged", "payment", "card", "billing"))
+        cancellation = result.intent == SupportIntent.CANCELLATION or "cancel" in text
+        delivery_security = any(t in text for t in ("lost", "damaged"))
+        account_security = any(t in text for t in ("hacked", "unauthorized", "stolen", "suspicious"))
+        resolved_followup = (
+            context.escalation_status == "RESOLVED"
+            and bool(context.human_response)
+            and any(
+                term in text
+                for term in ("decision", "update", "resolved", "approved", "human agent", "support agent")
+            )
+        )
         sensitive_reason = None
-        if result.intent == SupportIntent.REFUND or any(
-            term in text for term in ("refund", "money back")
-        ):
+        if refund:
             sensitive_reason = "Refund requests require human review."
-        elif result.intent == SupportIntent.PAYMENT_ISSUE or any(
-            term in text for term in ("charged", "payment", "card", "billing")
-        ):
+        elif payment:
             sensitive_reason = "Payment issues require secure human review."
-        elif result.intent == SupportIntent.CANCELLATION or any(
-            term in text for term in ("cancel", "cancellation")
-        ):
+        elif cancellation:
             sensitive_reason = "Cancellation requests require human review."
-        elif any(term in text for term in ("lost", "damaged")):
+        elif delivery_security:
             sensitive_reason = "A lost or damaged delivery requires human review."
-        elif any(
-            term in text
-            for term in ("hacked", "unauthorized", "stolen", "suspicious")
-        ):
+        elif account_security:
             sensitive_reason = "A possible account security issue requires human review."
 
-        should_escalate = (
-            result.should_escalate
-            or result.confidence < 0.70
-            or sensitive_reason is not None
+        should_escalate = False if resolved_followup else (
+            result.should_escalate or result.confidence < 0.70 or sensitive_reason is not None
         )
         escalation_reason = result.escalation_reason
-        if should_escalate and not escalation_reason:
-            if sensitive_reason:
-                escalation_reason = sensitive_reason
-            elif result.confidence < 0.70:
-                escalation_reason = (
-                    f"Low-confidence {result.intent.value} request "
-                    f"({result.confidence:.2f})."
-                )
-            else:
-                escalation_reason = "Support provider recommended human review."
-        reply = result.reply.strip()
-        if result.intent == SupportIntent.ORDER_STATUS:
-            reply = (
-                f"Your order is currently {context.order_status}."
-                if context.order_status
-                else "I can help check the order status once an order is selected."
+        if resolved_followup:
+            escalation_reason = None
+        elif sensitive_reason is not None:
+            escalation_reason = sensitive_reason
+        elif should_escalate and not escalation_reason:
+            escalation_reason = (
+                f"Low-confidence {result.intent.value} request ({result.confidence:.2f})."
+                if result.confidence < 0.70 else "Support agent recommended human review."
             )
+
+        reply = result.reply.strip()
+        if SupportAIService._contains_unsupported_claim(reply, result.intent, context):
+            reply = create_agent_registry()[result.intent].handle(context).result.reply
         return SupportResult(
             reply=reply,
             intent=result.intent,
             confidence=float(result.confidence),
             should_escalate=should_escalate,
             escalation_reason=escalation_reason,
+            action=result.action,
+            missing_information=result.missing_information,
+            evidence_needed=result.evidence_needed,
+            findings=result.findings,
+            recommended_resolution=result.recommended_resolution,
         )
+
+    @staticmethod
+    def _contains_unsupported_claim(reply: str, intent: SupportIntent, context: SupportContext) -> bool:
+        text = reply.casefold()
+        if intent == SupportIntent.ORDER_STATUS:
+            facts = ("arrive tomorrow", "arrives tomorrow", "courier is", "tracking number", "out for delivery", "has shipped", "was delivered")
+            if any(term in text for term in facts):
+                return not context.order_status or context.order_status.casefold() not in text
+        if intent == SupportIntent.DELIVERY_ISSUE and any(
+            term in text for term in ("arrive tomorrow", "arrives tomorrow", "courier is", "tracking number")
+        ):
+            return True
+        if intent == SupportIntent.REFUND and any(t in text for t in ("refund approved", "refund issued", "refund sent")):
+            return True
+        if intent == SupportIntent.CANCELLATION and any(t in text for t in ("i cancelled", "i canceled", "is now cancelled", "is now canceled")):
+            return True
+        secrets = ("card number", "cvv", "otp", "password", "recovery code")
+        requests = ("send your", "share your", "provide your", "tell me your")
+        return any(t in text for t in requests) and any(t in text for t in secrets)
+
+    def analyze_evidence(self, context: SupportContext, image_bytes: bytes, media_type: str) -> EvidenceAnalysis:
+        if self.provider is not None and hasattr(self.provider, "analyze_evidence"):
+            try:
+                analysis = self.provider.analyze_evidence(context, image_bytes, media_type)  # type: ignore[union-attr]
+                if not 0.0 <= analysis.confidence <= 1.0:
+                    raise ValueError("Evidence confidence must be between 0 and 1.")
+                if analysis.recommended_resolution not in {
+                    RecommendedResolution.INVESTIGATE,
+                    RecommendedResolution.REFUND,
+                    RecommendedResolution.REPLACE,
+                }:
+                    raise ValueError("Evidence recommendation is unsupported.")
+                return analysis
+            except Exception as exc:
+                logger.warning(
+                    "Evidence provider failed; safe human-review fallback used: "
+                    "type=%s code=%s status=%s",
+                    type(exc).__name__, getattr(exc, "code", None),
+                    getattr(exc, "status", None),
+                )
+        return EvidenceAnalysis(
+            findings=("Customer-supplied image received; automated analysis is unavailable.",),
+            limitations=("A human must review the original customer-supplied image.",),
+            confidence=0.0,
+            recommended_resolution=RecommendedResolution.INVESTIGATE,
+        )
+
+
+__all__ = [
+    "DeterministicSupportProvider", "IntentRouter", "ProviderObservation",
+    "RoutingDecision", "RoutingOutcome", "SupportAIService", "SupportContext",
+    "SupportIntent", "SupportProvider", "SupportResult", "SupportTurn",
+]

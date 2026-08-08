@@ -255,7 +255,8 @@ class GeminiProviderTests(unittest.TestCase):
         result = service.respond(
             SupportContext(message="Where is my order?", order_status="processing")
         )
-        self.assertEqual(result.reply, "Your order is currently processing.")
+        self.assertIn("current status is processing", result.reply)
+        self.assertIn("latest status available in ShopX", result.reply)
         self.assertNotIn("delivered", result.reply)
 
     def test_prompt_contains_backend_context_without_api_key(self) -> None:
