@@ -5,7 +5,12 @@ from unittest.mock import patch
 from app.schemas.chat import ChatResponse
 from app.services.gemini_provider import GeminiProvider
 from app.services.provider_factory import create_support_ai_service
-from app.services.support_ai import SupportAIService, SupportContext, SupportIntent
+from app.services.support_ai import (
+    SupportAIService,
+    SupportContext,
+    SupportIntent,
+    SupportTurn,
+)
 
 
 class FakeResponse:
@@ -212,6 +217,32 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertTrue(result.should_escalate)
         self.assertEqual(result.escalation_reason, "Refund requests require human review.")
 
+    def test_sensitive_history_keeps_follow_up_under_human_review(self) -> None:
+        provider, _ = self._provider(
+            text=self._json_response(
+                intent="delivery_issue",
+                confidence=0.95,
+                should_escalate=False,
+            )
+        )
+        service = SupportAIService(provider=provider)
+        result = service.respond(
+            SupportContext(
+                message="The outer box looked fine",
+                history=(
+                    SupportTurn(
+                        sender_type="CUSTOMER",
+                        content="My headphones arrived damaged",
+                    ),
+                ),
+            )
+        )
+        self.assertTrue(result.should_escalate)
+        self.assertEqual(
+            result.escalation_reason,
+            "A lost or damaged delivery requires human review.",
+        )
+
     def test_backend_order_status_overrides_provider_claim(self) -> None:
         provider, _ = self._provider(
             text=self._json_response(
@@ -259,6 +290,41 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertIn("processing", request_data)
         self.assertNotIn(secret, request_data)
         self.assertNotIn(secret, response_data)
+
+    def test_prompt_contains_conversation_history_for_follow_up(self) -> None:
+        provider, client = self._provider(
+            text=self._json_response(
+                reply="Thanks. Is the product itself cracked or not working?",
+                intent="delivery_issue",
+                confidence=0.90,
+                should_escalate=True,
+                escalation_reason="Damaged delivery requires human review.",
+            )
+        )
+        provider.respond(
+            SupportContext(
+                message="The outer box looked fine",
+                customer_name="Demo Customer",
+                product_name="Headphones",
+                history=(
+                    SupportTurn(
+                        sender_type="CUSTOMER",
+                        content="My headphones arrived damaged",
+                    ),
+                    SupportTurn(
+                        sender_type="AI",
+                        content="Was the outer package damaged too?",
+                    ),
+                ),
+            )
+        )
+
+        prompt = str(client.models.calls[0]["contents"])
+        self.assertIn("conversation_history", prompt)
+        self.assertIn("My headphones arrived damaged", prompt)
+        self.assertIn("Was the outer package damaged too?", prompt)
+        self.assertIn("The outer box looked fine", prompt)
+        self.assertIn("trusted_backend_context", prompt)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from app.services.support_ai import (
     SupportAIService,
     SupportContext,
     SupportResult,
+    SupportTurn,
 )
 from app.services.support_agents import (
     AccountSupportAgent,
@@ -25,6 +26,7 @@ __all__ = [
     "SupportContext",
     "ProviderObservation",
     "SupportResult",
+    "SupportTurn",
     "SupportIntent",
     "RoutingDecision",
     "OrderStatusAgent",

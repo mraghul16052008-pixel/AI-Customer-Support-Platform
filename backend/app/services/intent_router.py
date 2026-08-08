@@ -22,7 +22,27 @@ class RoutingOutcome:
 
 class DeterministicIntentRouter:
     def route(self, context: SupportContext) -> RoutingDecision:
-        text = context.message.casefold()
+        current = self._route_text(context.message)
+        if current.intent != SupportIntent.GENERAL_QUERY:
+            return current
+
+        # A short follow-up can omit the original issue words (for example,
+        # "the outer box looked fine"). Reuse the most recent explicit customer
+        # intent so the deterministic fallback remains conversational too.
+        for turn in reversed(context.history[-12:]):
+            if turn.sender_type.upper() != "CUSTOMER":
+                continue
+            previous = self._route_text(turn.content)
+            if previous.intent != SupportIntent.GENERAL_QUERY:
+                return RoutingDecision(
+                    previous.intent,
+                    max(0.70, previous.confidence - 0.05),
+                )
+        return current
+
+    @staticmethod
+    def _route_text(message: str) -> RoutingDecision:
+        text = message.casefold()
         if any(term in text for term in ("refund", "money back", "return")):
             return RoutingDecision(SupportIntent.REFUND, 0.94)
         if any(term in text for term in ("charged", "payment", "card", "billing")):

@@ -234,9 +234,15 @@ class DeliverySupportAgent(SpecializedSupportAgent):
         )
 
         if evidence_issue and not evidence and not asked_before:
+            detail_prefix = (
+                "Thanks, I've added that detail to the investigation. "
+                if context.history
+                else ""
+            )
             return AgentDecision(
                 reply=(
-                    "I'm sorry the delivered item is damaged or does not match the order. "
+                    detail_prefix
+                    + "I'm sorry the delivered item is damaged or does not match the order. "
                     "To document what happened, could you upload a clear photo of the "
                     "item first? If "
                     "available, an outer-packaging photo and shipping-label photo also "
@@ -258,7 +264,7 @@ class DeliverySupportAgent(SpecializedSupportAgent):
         if evidence_issue and not evidence:
             return AgentDecision(
                 reply=(
-                    "Thanks for the additional detail. I haven't received image "
+                    "Thanks, I've added that detail to the investigation. I haven't received image "
                     "evidence, and I won't ask you for the same photos again. I also "
                     "cannot compare the shipment with trusted packing evidence because "
                     "that source is unavailable. I'll send the available conversation "

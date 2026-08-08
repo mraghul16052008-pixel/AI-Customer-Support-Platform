@@ -21,6 +21,16 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class SupportTurn:
+    """Backwards-compatible conversation turn used by existing integrations/tests."""
+
+    sender_type: str
+    content: str
+    intent: str | None = None
+    confidence: float | None = None
+
+
+@dataclass(frozen=True)
 class ProviderObservation:
     selected_provider: str
     request_attempted: bool
@@ -189,7 +199,16 @@ class SupportAIService:
         if not 0.0 <= result.confidence <= 1.0:
             raise ValueError("Provider confidence must be between 0 and 1.")
 
-        text = context.message.casefold()
+        text = "\n".join(
+            [
+                *(
+                    turn.content
+                    for turn in context.history[-12:]
+                    if turn.sender_type.upper() == "CUSTOMER"
+                ),
+                context.message,
+            ]
+        ).casefold()
         refund = result.intent == SupportIntent.REFUND or any(t in text for t in ("refund", "money back", "return"))
         payment = result.intent == SupportIntent.PAYMENT_ISSUE or any(t in text for t in ("charged", "payment", "card", "billing"))
         cancellation = result.intent == SupportIntent.CANCELLATION or "cancel" in text
@@ -295,5 +314,5 @@ class SupportAIService:
 __all__ = [
     "DeterministicSupportProvider", "IntentRouter", "ProviderObservation",
     "RoutingDecision", "RoutingOutcome", "SupportAIService", "SupportContext",
-    "SupportIntent", "SupportProvider", "SupportResult",
+    "SupportIntent", "SupportProvider", "SupportResult", "SupportTurn",
 ]
