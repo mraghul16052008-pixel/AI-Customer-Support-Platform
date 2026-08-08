@@ -19,6 +19,7 @@ from app.services.support_ai import (
     SupportContext,
     SupportIntent,
     SupportResult,
+    SupportTurn,
 )
 
 
@@ -33,6 +34,20 @@ class UnsafeLowConfidenceProvider:
             reply="Uncertain provider response",
             intent=SupportIntent.GENERAL_QUERY,
             confidence=0.40,
+            should_escalate=False,
+        )
+
+
+class RecordingConversationProvider:
+    def __init__(self) -> None:
+        self.contexts: list[SupportContext] = []
+
+    def respond(self, context: SupportContext) -> SupportResult:
+        self.contexts.append(context)
+        return SupportResult(
+            reply="Thanks. Tell me one more detail about the delivery problem.",
+            intent=SupportIntent.DELIVERY_ISSUE,
+            confidence=0.90,
             should_escalate=False,
         )
 
@@ -176,6 +191,60 @@ class OrdersChatPipelineTests(unittest.TestCase):
         )
         self.assertEqual(second.conversation_id, first.conversation_id)
         self.assertEqual(conversation_count, 1)
+
+    def test_continued_chat_passes_persisted_history_to_provider(self) -> None:
+        provider = RecordingConversationProvider()
+        chat_routes.support_ai_service = SupportAIService(provider=provider)
+
+        first = create_chat(
+            self._chat_payload(message="My headphones arrived damaged"),
+            self.db,
+            self.company_a,
+        )
+        create_chat(
+            self._chat_payload(
+                message="The outer box looked fine",
+                conversation_id=first.conversation_id,
+            ),
+            self.db,
+            self.company_a,
+        )
+
+        self.assertEqual(len(provider.contexts), 2)
+        second_context = provider.contexts[1]
+        self.assertEqual(
+            [(turn.sender_type, turn.content) for turn in second_context.history],
+            [
+                ("CUSTOMER", "My headphones arrived damaged"),
+                (
+                    "AI",
+                    "Thanks. Tell me one more detail about the delivery problem.",
+                ),
+            ],
+        )
+
+    def test_fallback_uses_customer_history_for_short_follow_up(self) -> None:
+        service = SupportAIService()
+        result = service.respond(
+            SupportContext(
+                message="The outer box looked fine",
+                history=(
+                    SupportTurn(
+                        sender_type="CUSTOMER",
+                        content="My headphones arrived damaged",
+                    ),
+                    SupportTurn(
+                        sender_type="AI",
+                        content="Please tell me whether the outer package was damaged.",
+                        intent="delivery_issue",
+                        confidence=0.90,
+                    ),
+                ),
+            )
+        )
+        self.assertEqual(result.intent, SupportIntent.DELIVERY_ISSUE)
+        self.assertTrue(result.should_escalate)
+        self.assertIn("added that detail", result.reply)
 
     def test_customer_message_is_persisted(self) -> None:
         response = create_chat(self._chat_payload(), self.db, self.company_a)

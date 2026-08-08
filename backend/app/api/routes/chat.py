@@ -9,7 +9,7 @@ from app.api.dependencies import get_current_company
 from app.db.session import get_db
 from app.models import Company, Conversation, Customer, Escalation, Message, Order
 from app.schemas.chat import ChatRequest, ChatResponse
-from app.services import SupportContext, support_ai_service
+from app.services import SupportContext, SupportTurn, support_ai_service
 
 
 router = APIRouter()
@@ -82,6 +82,25 @@ def create_chat(
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
+    previous_messages = list(
+        db.scalars(
+            select(Message)
+            .where(Message.conversation_id == conversation.id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(12)
+        ).all()
+    )
+    previous_messages.reverse()
+    history = tuple(
+        SupportTurn(
+            sender_type=message.sender_type,
+            content=message.content,
+            intent=message.intent,
+            confidence=message.confidence,
+        )
+        for message in previous_messages
+    )
+
     customer_message = Message(
         conversation_id=conversation.id,
         sender_type="CUSTOMER",
@@ -98,6 +117,7 @@ def create_chat(
                 order.external_order_id if order is not None else None
             ),
             product_name=order.product_name if order is not None else None,
+            history=history,
         )
     )
     ai_message = Message(

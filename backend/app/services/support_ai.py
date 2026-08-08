@@ -19,12 +19,21 @@ class SupportIntent(StrEnum):
 
 
 @dataclass(frozen=True)
+class SupportTurn:
+    sender_type: str
+    content: str
+    intent: str | None = None
+    confidence: float | None = None
+
+
+@dataclass(frozen=True)
 class SupportContext:
     message: str
     customer_name: str | None = None
     order_status: str | None = None
     external_order_id: str | None = None
     product_name: str | None = None
+    history: tuple[SupportTurn, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,7 +62,9 @@ class SupportProvider(Protocol):
 
 class DeterministicSupportProvider:
     def respond(self, context: SupportContext) -> SupportResult:
-        text = context.message.casefold()
+        current_text = context.message.casefold()
+        history_text = self._customer_history_text(context)
+        text = "\n".join(part for part in (history_text, current_text) if part)
 
         if any(term in text for term in ("refund", "money back", "return my")):
             return self._result(
@@ -99,11 +110,28 @@ class DeterministicSupportProvider:
             )
         ):
             sensitive = any(term in text for term in ("lost", "damaged"))
-            return self._result(
-                reply=(
+            first_sensitive_report = sensitive and not any(
+                term in history_text for term in ("lost", "damaged")
+            )
+            if first_sensitive_report:
+                reply = (
+                    "I’m sorry about that. Before a support agent decides the next "
+                    "step, please tell me what is damaged or missing and whether "
+                    "the outer package also showed damage."
+                )
+            elif sensitive:
+                reply = (
+                    "Thanks — I’ve added that detail to this support conversation. "
+                    "A support specialist can use the order and the details you’ve "
+                    "provided to review the next step."
+                )
+            else:
+                reply = (
                     "I’m sorry about the delivery problem. I’ve recorded the issue "
                     "and will help with the next step."
-                ),
+                )
+            return self._result(
+                reply=reply,
                 intent=SupportIntent.DELIVERY_ISSUE,
                 confidence=0.90,
                 force_escalation_reason=(
@@ -149,6 +177,14 @@ class DeterministicSupportProvider:
             ),
             intent=SupportIntent.GENERAL_QUERY,
             confidence=0.55,
+        )
+
+    @staticmethod
+    def _customer_history_text(context: SupportContext) -> str:
+        return "\n".join(
+            turn.content.casefold()
+            for turn in context.history[-12:]
+            if turn.sender_type.upper() == "CUSTOMER"
         )
 
     @staticmethod
@@ -261,7 +297,16 @@ class SupportAIService:
         if not 0.0 <= result.confidence <= 1.0:
             raise ValueError("Provider confidence must be between 0 and 1.")
 
-        text = context.message.casefold()
+        text = "\n".join(
+            [
+                *(
+                    turn.content
+                    for turn in context.history[-12:]
+                    if turn.sender_type.upper() == "CUSTOMER"
+                ),
+                context.message,
+            ]
+        ).casefold()
         sensitive_reason = None
         if result.intent == SupportIntent.REFUND or any(
             term in text for term in ("refund", "money back")
